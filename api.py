@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, Header, HTTPException, Depends, Form
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from typing import Optional, List
 import requests
 import uuid
@@ -17,6 +18,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = FastAPI(title="LlamaIndex AutoSplit API")
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # In-memory storage for jobs (in production, use a database)
 jobs_storage = {}
@@ -456,6 +460,7 @@ async def get_job_details(
 @app.post("/api/jobs/{job_id}/split-pdf")
 async def split_pdf_by_confidence(
     job_id: str,
+    email: Optional[str] = Form(None),
     api_key: str = Depends(get_api_key)
 ):
     """
@@ -539,13 +544,45 @@ async def split_pdf_by_confidence(
             original_filename = job.get("filename", "document.pdf")
             base_name = original_filename.rsplit('.', 1)[0] if '.' in original_filename else original_filename
             split_filename = f"{base_name}_part_{idx}_pages_{start}-{end}.pdf"
-            
             split_pdfs.append({
                 "filename": split_filename,
                 "content": pdf_buffer.getvalue(),
                 "pages": f"{start}-{end}"
             })
-        
+
+            # Send this split PDF via email if email provided
+            print("email", email)
+            if email and pdf_buffer.getvalue():  # Check if PDF is not empty
+                admin_url = os.getenv('DOCS2AI_URL')
+                user_email = os.getenv('USER_EMAIL', 'noreply@docs2ai.com')
+                if admin_url:
+                    data = {
+                        'headers[from]': user_email,
+                        'headers[to]': email,
+                        'headers[subject]': f'Split PDF Part {idx}',
+                        'envelope[from]': 'noreply@docs2ai.com',
+                        'envelope[to]': email,
+                        'envelope[recipients][]': email,
+                        'plain': '',
+                        'html': '',
+                    }
+                    base64_content = base64.b64encode(pdf_buffer.getvalue()).decode('utf-8')
+                    data['attachments[0][content]'] = base64_content
+                    data['attachments[0][file_name]'] = split_filename
+                    data['attachments[0][content_type]'] = 'application/pdf'
+                    data['attachments[0][size]'] = str(len(pdf_buffer.getvalue()))
+                    data['attachments[0][disposition]'] = 'attachment'
+                    try:
+                        response = requests.post(f'{admin_url}/api/incoming', data=data)
+                        if response.status_code == 200:
+                            result = response.json()
+                            if not result.get('status'):
+                                print(f"Email send failed for part {idx}: status not true in response: {result}")
+                        else:
+                            print(f"Email send failed for part {idx}: HTTP {response.status_code}, response: {response.text}")
+                    except Exception as e:
+                        print(f"Email send exception for part {idx}: {e}")
+                    
         # Create ZIP file with all split PDFs
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -572,13 +609,24 @@ async def split_pdf_by_confidence(
 
 
 @app.get("/")
-async def root():
+async def root(e: Optional[str] = None):
     """Serve the web interface"""
     import os
     # Serve the HTML file if it exists
     html_path = os.path.join(os.path.dirname(__file__), "index.html")
     if os.path.exists(html_path):
-        return FileResponse(html_path)
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        email = ''
+        print(e)
+        if e:
+            try:
+               email = base64.b64decode(e).decode("utf-8")
+            except Exception as ex:
+                print(f"Decrypt failed: {ex}")
+                email = "error"
+        html_content = html_content.replace('EMAIL_PLACEHOLDER', email)
+        return HTMLResponse(content=html_content)
     return {"message": "LlamaIndex AutoSplit API", "status": "running"}
 
 
