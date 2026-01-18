@@ -618,13 +618,15 @@ async def root(e: Optional[str] = None):
         with open(html_path, 'r', encoding='utf-8') as f:
             html_content = f.read()
         email = ''
-        print(e)
         if e:
             try:
                email = base64.b64decode(e).decode("utf-8")
             except Exception as ex:
                 print(f"Decrypt failed: {ex}")
-                email = "error"
+
+        if not email:
+            return {"message": "LlamaIndex AutoSplit API", "status": "running"}
+
         html_content = html_content.replace('EMAIL_PLACEHOLDER', email)
         return HTMLResponse(content=html_content)
     return {"message": "LlamaIndex AutoSplit API", "status": "running"}
